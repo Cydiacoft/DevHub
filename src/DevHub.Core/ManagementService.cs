@@ -52,7 +52,7 @@ public sealed class ManagementService(HubPaths paths)
         var retired = Path.Combine(removedRoot, Path.GetFileName(installation.HomePath) + "-" + Guid.NewGuid().ToString("N"));
         ct.ThrowIfCancellationRequested();
         // Retire the whole SDK atomically; permanent removal is a separate cache-space action.
-        Directory.Move(installation.HomePath, retired);
+        await DirectoryOperations.MoveAsync(installation.HomePath, retired, ct);
     }
     public static void DeleteTreeWithoutLinks(string directory, string allowedRoot)
     {
@@ -234,16 +234,7 @@ public static class DiagnosticService
             foreach (var binding in project.Bindings)
                 if (!installations.Any(i => i.Id == binding.Value)) issues.Add(new("错误", project.Name + " 的工具版本未找到", binding.Key));
             if (project.VirtualEnvironment is { Length: > 0 } venv && !File.Exists(Path.Combine(venv, "Scripts", "python.exe"))) issues.Add(new("错误", project.Name + " 的 Python 环境已失效", venv));
-            foreach (var binding in project.Bindings)
-            {
-                if (binding.Key is not ("python" or "node" or "dotnet" or "rust" or "flutter")) continue;
-                var selected = installations.FirstOrDefault(i => i.Id == binding.Value); if (selected is null) continue;
-                var file = Path.Combine(project.Directory, ProjectService.VersionFileName(binding.Key));
-                if (!File.Exists(file)) continue;
-                var content = File.ReadAllText(file);
-                var selectedVersion = ProjectService.CleanVersion(selected.Version);
-                if (!string.IsNullOrEmpty(selectedVersion) && !content.Contains(selectedVersion, StringComparison.Ordinal)) issues.Add(new("警告", project.Name + " 的版本声明可能与绑定不一致", $"文件：{file}\n选择：{selected.Version}\n请在项目页检查声明内容。", binding.Key));
-            }
+            issues.AddRange(ProjectDeclarations.Inspect(project, installations));
         }
         if (issues.Count == 0) issues.Add(new("正常", "未发现常见环境冲突", "工具入口和项目绑定检查通过。可继续运行各工具的专项诊断。"));
         return issues;

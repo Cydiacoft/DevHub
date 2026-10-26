@@ -3,5 +3,6 @@
   <Project Path="src/DevHub.Core/DevHub.Core.csproj" />
   <Project Path="src/DevHub.App/DevHub.App.csproj" />
   <Project Path="src/DevHub.Helper/DevHub.Helper.csproj" />
+  <Project Path="src/DevHub.Updater/DevHub.Updater.csproj" />
   <Project Path="tests/DevHub.Tests/DevHub.Tests.csproj" />
 </Solution>

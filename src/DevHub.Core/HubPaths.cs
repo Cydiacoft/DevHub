@@ -81,6 +81,18 @@ public sealed class HubPaths
 
 public sealed class JsonStore(HubPaths paths)
 {
+    public async Task<T> LoadRecoveringAsync<T>(string name, Func<T> fallback, ICollection<string> warnings)
+    {
+        try { return await LoadAsync(name, fallback); }
+        catch (InvalidDataException)
+        {
+            var file = Path.Combine(paths.Data, name + ".json");
+            var backup = Path.Combine(paths.Backups, $"corrupt-{name}-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}.json");
+            File.Copy(file, backup);
+            warnings.Add($"{name} 配置损坏，已使用默认值。原文件备份：{backup}");
+            return fallback();
+        }
+    }
     public async Task<T> LoadAsync<T>(string name, Func<T> fallback)
     {
         var file = Path.Combine(paths.Data, name + ".json");

@@ -126,6 +126,7 @@ public sealed partial class MainWindow
     private void RenderDiagnostics()
     {
         Heading("环境诊断", "检查命令入口、环境变量、重复路径和项目绑定。", Button("重新扫描并检查", vm.ScanAsync, true));
+        PageContent.Children.Add(Card(Stack(Text("解释命令来源与覆盖关系", 19, true), Muted("对比 DevHub 当前进程、新终端和项目环境；检查全部已知工具，不启动后台服务或下载 SDK。"), Button("打开环境对比", ShowEnvironmentEvidenceAsync, true))));
         foreach (var issue in DiagnosticService.Analyze(vm.Installations, vm.Projects))
         {
             var severity = issue.Severity switch { "错误" => InfoBarSeverity.Error, "警告" => InfoBarSeverity.Warning, "正常" => InfoBarSeverity.Success, _ => InfoBarSeverity.Informational };
@@ -231,6 +232,7 @@ public sealed partial class MainWindow
     private void RenderSettings()
     {
         Heading("设置", "外观、扫描范围、自定义工具和配置恢复。");
+        AddUpdateSettings();
         var theme = new ComboBox { Header = "外观", ItemsSource = new[] { "跟随系统", "浅色", "深色" }, SelectedIndex = vm.Settings.Theme switch { "Light" => 1, "Dark" => 2, _ => 0 }, Width = 240 };
         theme.SelectionChanged += async (_, _) => await Guard(async () => { vm.Settings.Theme = new[] { "Default", "Light", "Dark" }[theme.SelectedIndex]; ApplyTheme(); await vm.SaveSettingsAsync(); });
         var manager = new ComboBox { Header = "首选包管理器", ItemsSource = new[] { "winget", "scoop", "choco" }, SelectedItem = vm.Settings.PreferredPackageManager, Width = 240 };

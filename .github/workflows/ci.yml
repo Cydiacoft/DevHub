@@ -1,0 +1,85 @@
+name: Build and verify DevHub
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.200'
+      - name: Verify tag matches source version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $version = ([xml](Get-Content Directory.Build.props -Raw)).Project.PropertyGroup.Version
+          if ($env:RELEASE_TAG -ne "v$version") { throw 'Tag and source version do not match.' }
+      - name: Build
+        run: ./build.ps1 -Task Build
+      - name: Tests
+        run: ./build.ps1 -Task Test -NoRestore
+      - name: Build standalone release package
+        run: ./build.ps1 -Task Package -NoRestore
+      - name: Verify extracted application starts
+        run: |
+          $package = Get-ChildItem .devhub/build/staging -Directory -Filter 'package-*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          ./scripts/Test-PublishedApp.ps1 -PublishDirectory $package.FullName
+      - name: Verify updater and automatic rollback in isolated directories
+        run: |
+          $package = Get-ChildItem .devhub/build/staging -Directory -Filter 'package-*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $env:DEVHUB_ROOT = $pwd.Path
+          $env:DOTNET_CLI_HOME = Join-Path $pwd '.devhub/data/dotnet-home'
+          $env:NUGET_PACKAGES = Join-Path $pwd '.devhub/cache/nuget/packages'
+          dotnet run --project tests/DevHub.Tests/DevHub.Tests.csproj -p:Platform=x64 --configuration Release --no-build --no-restore -- --update-smoke $package.FullName
+          if ($LASTEXITCODE) { throw 'Updater integration checks failed.' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: DevHub-win-x64
+          path: .devhub/build/releases/*
+          include-hidden-files: true
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: validation-records
+          path: |
+            .devhub/build/published-smoke-result.json
+            .devhub/build/update-smoke-result.json
+            .devhub/build/smoke/**/.devhub/logs/*
+          include-hidden-files: true
+          if-no-files-found: ignore
+  release-draft:
+    if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+    needs: verify
+    runs-on: windows-2025-vs2026
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: DevHub-win-x64
+          path: release-files
+      - name: Create reviewable draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $assets = @(Get-ChildItem -LiteralPath release-files -File | ForEach-Object FullName)
+          gh release create $env:RELEASE_TAG @assets --repo $env:REPOSITORY --verify-tag --draft --generate-notes --title "DevHub $env:RELEASE_TAG"
+          if ($LASTEXITCODE) { throw 'Draft release failed.' }

@@ -10,7 +10,9 @@ if (-not (Test-Path -LiteralPath $devHubExecutable)) { throw '请先发布 DevHu
 $devHubShell = New-Object -ComObject WScript.Shell
 try {
     $devHubShortcut = $devHubShell.CreateShortcut((Join-Path $devHubRoot 'DevHub.lnk'))
-    $devHubShortcut.TargetPath = $devHubExecutable
+    $devHubShortcut.TargetPath = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    $devHubShortcut.Arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path (Split-Path -Parent $devHubExecutable) 'Start-DevHub.ps1') + '" -RootDirectory "' + $devHubRoot + '"'
+    $devHubShortcut.WindowStyle = 7
     $devHubShortcut.WorkingDirectory = Split-Path -Parent $devHubExecutable
     $devHubShortcut.IconLocation = $devHubExecutable + ',0'
     $devHubShortcut.Description = 'DevHub 开发环境管理器'

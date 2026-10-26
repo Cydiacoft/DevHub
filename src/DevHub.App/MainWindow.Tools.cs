@@ -121,18 +121,38 @@ public sealed partial class MainWindow
 
     private async Task SwitchGlobalAsync(ToolInstallation installation)
     {
-        var request = vm.EnvironmentService.PlanSwitch(installation);
+        var scope = new ComboBox { Header = "修改范围", ItemsSource = new[] { "当前用户（默认，不请求管理员权限）", "整个系统（需要管理员授权）" }, SelectedIndex = 0, MinWidth = 430 };
+        if (await ShowAsync(new ContentDialog { Title = "设置默认 " + installation.Name, Content = Stack(scope, Muted("系统 PATH 中已有的入口可能优先于用户 PATH；会先检查修改后的候选顺序。")), PrimaryButtonText = "生成预览", CloseButtonText = "取消" }) != ContentDialogResult.Primary) return;
+        var request = vm.EnvironmentService.PlanSwitch(installation, scope.SelectedIndex == 0 ? "User" : "Machine");
+        var expectedEnvironment = vm.EnvironmentService.PreviewEnvironment(request);
+        var commandName = Path.GetFileNameWithoutExtension(installation.ExecutablePath);
+        var candidate = EnvironmentDoctor.Resolve(commandName, expectedEnvironment).FirstOrDefault();
+        if (request.Scope == "User" && (candidate is null || !DiscoveryService.SamePath(candidate.RealPath, EnvironmentDoctor.RealPath(installation.ExecutablePath))))
+        {
+            await MessageAsync("用户级修改无法改变当前优先入口", "系统 PATH 中的入口仍会优先命中：\n" + (candidate?.Path ?? "未找到") + "\n\n配置尚未修改。可以使用项目环境终端，或重新选择系统级修复范围。"); return;
+        }
         var preview = string.Join("\n\n", request.Changes.Select(c => $"[{c.Before.Scope}] {c.Before.Name}\n原值：{c.Before.Value ?? "（未设置）"}\n新值：{c.After.Value}"));
-        if (!await ConfirmAsync("预览全局切换", request.Description + "\n\n" + preview + "\n\n将保存备份，并请求 Windows 管理员授权。已有终端需要重新打开。", "应用切换")) return;
+        if (!await ConfirmAsync("预览默认环境修改", request.Description + "\n\n" + preview + "\n\n将保存备份。" + (request.Scope == "Machine" ? "需要 Windows 管理员授权。" : "只修改当前用户配置。") + "已有终端需要重新打开。", "应用切换")) return;
         await vm.RunAsync("切换全局 " + installation.Name, async (_, _) => { await vm.EnvironmentService.ApplyElevatedAsync(request); return true; });
         var fresh = vm.EnvironmentService.FreshEnvironment();
+        var evidence = await vm.RunAsync("验证修改后的命令解析", (_, ct) => new EnvironmentDoctor(vm.Paths, vm.Runner).InspectAsync("新终端", fresh, vm.Definitions, vm.Installations, ct: ct));
+        var verified = evidence.Commands.FirstOrDefault(t => t.ToolId == installation.ToolId);
+        if (verified?.SelectedPath is null || !DiscoveryService.SamePath(EnvironmentDoctor.RealPath(verified.SelectedPath), EnvironmentDoctor.RealPath(installation.ExecutablePath)))
+            throw new InvalidOperationException("配置已写入，但新终端命令没有命中所选入口：" + (verified?.SelectedPath ?? "未找到") + "。请查看环境诊断，或在设置中恢复备份。");
         if (installation.ToolId == "java")
         {
-            var java = await vm.ExecuteAsync("验证 Java 新环境", new(Path.Combine(installation.HomePath, "bin", "java.exe"), ["-version"], vm.Paths.Root, fresh, 15));
-            var javac = await vm.ExecuteAsync("验证 javac 新环境", new(Path.Combine(installation.HomePath, "bin", "javac.exe"), ["-version"], vm.Paths.Root, fresh, 15));
+            var javaTrace = evidence.Commands.First(t => t.Command == "java"); var javacTrace = evidence.Commands.First(t => t.Command == "javac");
+            if (javaTrace.SelectedPath is null || javacTrace.SelectedPath is null || !DiscoveryService.SamePath(EnvironmentDoctor.RealPath(javaTrace.SelectedPath), EnvironmentDoctor.RealPath(Path.Combine(installation.HomePath, "bin", "java.exe"))) || !DiscoveryService.SamePath(EnvironmentDoctor.RealPath(javacTrace.SelectedPath), EnvironmentDoctor.RealPath(Path.Combine(installation.HomePath, "bin", "javac.exe"))))
+                throw new InvalidOperationException("配置已写入，但新环境中的 java / javac 没有命中所选 JDK。请查看环境诊断，或在设置中恢复备份。");
+            var java = await vm.ExecuteAsync("验证 Java 新环境", new(javaTrace.SelectedPath, ["-version"], vm.Paths.Root, fresh, 15, PreserveHostEnvironment: true));
+            var javac = await vm.ExecuteAsync("验证 javac 新环境", new(javacTrace.SelectedPath, ["-version"], vm.Paths.Root, fresh, 15, PreserveHostEnvironment: true));
             await MessageAsync("Java 全局配置已更新", "JAVA_HOME：" + fresh.GetValueOrDefault("JAVA_HOME") + "\n\n" + java + "\n" + javac + "\n\n请重新打开终端和需要使用该环境的开发工具。");
         }
-        else await MessageAsync("全局配置已更新", "配置已保存并发送环境更新通知。请重新打开终端。可从项目页立即打开使用新环境的终端。");
+        else
+        {
+            var version = await vm.RunAsync("查询修改后的入口版本", (_, ct) => new EnvironmentDoctor(vm.Paths, vm.Runner).ProbeAsync(verified, fresh, vm.Paths.Root, ct));
+            await MessageAsync("默认配置已更新", "新环境命中：" + verified.SelectedPath + "\n\n" + version + "\n\n请重新打开终端。也可从项目页打开使用指定环境的终端。");
+        }
         // Bring this process in sync only after successful validation; existing shells remain unchanged.
         foreach (var pair in fresh) Environment.SetEnvironmentVariable(pair.Key, pair.Value);
         await vm.ScanAsync();

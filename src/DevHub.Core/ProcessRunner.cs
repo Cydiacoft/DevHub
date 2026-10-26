@@ -26,6 +26,8 @@ public sealed class ProcessRunner(HubPaths paths) : ICommandRunner
             RedirectStandardOutput = !spec.Interactive,
             RedirectStandardError = !spec.Interactive,
             RedirectStandardInput = !spec.Interactive,
+            StandardOutputEncoding = spec.Interactive ? null : Encoding.UTF8,
+            StandardErrorEncoding = spec.Interactive ? null : Encoding.UTF8,
             WorkingDirectory = spec.WorkingDirectory ?? Environment.CurrentDirectory
         };
         if (batch)
@@ -47,7 +49,7 @@ public sealed class ProcessRunner(HubPaths paths) : ICommandRunner
             info.ArgumentList.Add("-NoProfile");
             info.ArgumentList.Add("-NonInteractive");
             info.ArgumentList.Add("-EncodedCommand");
-            var command = "& " + PowerShellLiteral(spec.FileName) + " " + string.Join(" ", spec.Arguments.Select(PowerShellLiteral)) + "; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }";
+            var command = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; & " + PowerShellLiteral(spec.FileName) + " " + string.Join(" ", spec.Arguments.Select(PowerShellLiteral)) + "; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }";
             info.ArgumentList.Add(EncodedScript(command));
         }
         else foreach (var argument in spec.Arguments) info.ArgumentList.Add(argument);

@@ -41,9 +41,26 @@ public sealed partial class MainWindow : Window
             if (initialized) return; initialized = true;
             Navigation.SelectedItem = Navigation.MenuItems[0];
             RenderPage();
-            await Guard(vm.InitializeAsync);
+            try { await vm.InitializeAsync(); }
+            catch (Exception error) { Program.ShowFailure(error); Application.Current.Exit(); return; }
             if (initialPage == "cache") cacheSection = 2;
             if (initialPage != "home") Navigate(initialPage);
+            if (App.AutoExitSmoke)
+            {
+                try { await ValidateSmokeLayoutAsync(); }
+                catch (Exception error) { Program.ShowFailure(error); Environment.ExitCode = 1; Application.Current.Exit(); return; }
+            }
+            App.WriteStartupReport("ready");
+            if (App.AutoExitSmoke)
+            {
+                var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                timer.Tick += (_, _) => { timer.Stop(); Application.Current.Exit(); }; timer.Start();
+            }
+            else if (!App.SmokeTest)
+            {
+                _ = Guard(vm.ScanAsync);
+                _ = CheckForUpdatesOnStartupAsync();
+            }
         };
         Closed += (_, _) => vm.Dispose();
     }
@@ -178,6 +195,7 @@ public sealed partial class MainWindow : Window
     private void RenderHome()
     {
         Heading("开发环境，一处掌握", "找到工具的位置，理清版本与项目之间的关系。", Button("重新扫描", vm.ScanAsync, true));
+        foreach (var warning in vm.StartupWarnings) PageContent.Children.Add(new InfoBar { Title = "已使用恢复配置", Message = warning, Severity = InfoBarSeverity.Warning, IsOpen = true, IsClosable = false });
         var issues = DiagnosticService.Analyze(vm.Installations, vm.Projects).Where(d => d.Severity is "错误" or "警告").ToList();
         var stats = new Grid { ColumnSpacing = 14 };
         var values = new[] { ("已识别工具", vm.Installations.Where(i => !i.ToolId.StartsWith("unknown:")).Select(i => i.ToolId).Distinct().Count().ToString()), ("安装与版本", vm.Installations.Count(i => !i.ToolId.StartsWith("unknown:")).ToString()), ("项目环境", vm.Projects.Count.ToString()), ("待检查问题", issues.Count.ToString()) };

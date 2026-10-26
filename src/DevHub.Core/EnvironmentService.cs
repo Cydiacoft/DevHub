@@ -8,7 +8,7 @@ namespace DevHub.Core;
 
 public sealed record EnvironmentValue(string Scope, string Name, string? Value, int Kind = 2);
 public sealed record EnvironmentChange(EnvironmentValue Before, EnvironmentValue After);
-public sealed record EnvironmentRequest(string Root, string UserSid, List<EnvironmentChange> Changes, string Description);
+public sealed record EnvironmentRequest(string Root, string UserSid, List<EnvironmentChange> Changes, string Description, string Scope = "User");
 public sealed record EnvironmentBackup(DateTimeOffset Created, string Description, List<EnvironmentChange> Changes);
 
 public interface IEnvironmentStore
@@ -48,8 +48,9 @@ public sealed class EnvironmentService(HubPaths paths, IEnvironmentStore store)
 {
     public static readonly string[] AllowedNames = ["Path", "JAVA_HOME", "JDK_HOME", "FLUTTER_ROOT", "GOROOT", "ANDROID_HOME", "ANDROID_SDK_ROOT"];
 
-    public EnvironmentRequest PlanSwitch(ToolInstallation installation)
+    public EnvironmentRequest PlanSwitch(ToolInstallation installation, string scope = "User")
     {
+        if (scope is not ("User" or "Machine")) throw new ArgumentException("无效修改范围。");
         if (!File.Exists(installation.ExecutablePath)) throw new FileNotFoundException("工具入口已不存在。", installation.ExecutablePath);
         if (installation.Owner is not null) throw new InvalidOperationException("该工具由其他软件提供，请先安装独立版本后再设置为全局默认。");
         if (installation.ToolId == "java" && !installation.IsJdk) throw new InvalidOperationException("全局开发环境请选择包含 javac 的 JDK。");
@@ -57,7 +58,7 @@ public sealed class EnvironmentService(HubPaths paths, IEnvironmentStore store)
             throw new InvalidOperationException("该工具请使用所属管理器或项目版本设置。");
         var changes = new List<EnvironmentChange>();
         var bin = Path.GetDirectoryName(installation.ExecutablePath)!;
-        var before = store.Read("Machine", "Path");
+        var before = store.Read(scope, "Path");
         var entries = (before.Value ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries).ToList();
         entries.RemoveAll(e => SameExpandedPath(e, bin));
         entries.Insert(0, bin);
@@ -74,18 +75,18 @@ public sealed class EnvironmentService(HubPaths paths, IEnvironmentStore store)
         };
         foreach (var variable in variables)
         {
-            var machine = store.Read("Machine", variable);
+            var machine = store.Read(scope, variable);
             changes.Add(new(machine, machine with { Value = installation.HomePath }));
             var user = store.Read("User", variable);
-            if (user.Value is not null) changes.Add(new(user, user with { Value = installation.HomePath }));
+            if (scope == "Machine" && user.Value is not null) changes.Add(new(user, user with { Value = installation.HomePath }));
         }
         if (installation.ToolId == "java")
-            foreach (var scope in new[] { "Machine", "User" })
+            foreach (var variableScope in scope == "Machine" ? new[] { "Machine", "User" } : new[] { "User" })
             {
-                var jdk = store.Read(scope, "JDK_HOME");
+                var jdk = store.Read(variableScope, "JDK_HOME");
                 if (jdk.Value is not null) changes.Add(new(jdk, jdk with { Value = installation.HomePath }));
             }
-        return new(paths.Root, CurrentSid(), changes, $"将 {installation.Name} {installation.Version} 设为全局默认");
+        return new(paths.Root, CurrentSid(), changes, $"将 {installation.Name} {installation.Version} 设为{(scope == "User" ? "当前用户" : "系统")}默认", scope);
     }
 
     public EnvironmentRequest PlanRestore(EnvironmentBackup backup)
@@ -96,6 +97,10 @@ public sealed class EnvironmentService(HubPaths paths, IEnvironmentStore store)
 
     public async Task ApplyElevatedAsync(EnvironmentRequest request)
     {
+        if (request.Changes.All(c => c.Before.Scope == "User"))
+        {
+            ApplyTransaction(request, store, paths); return;
+        }
         var requestDir = Path.Combine(paths.Data, "environment-requests"); Directory.CreateDirectory(requestDir);
         var requestPath = Path.Combine(requestDir, Guid.NewGuid().ToString("N") + ".json");
         await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, JsonDefaults.Options));
@@ -141,7 +146,9 @@ public sealed class EnvironmentService(HubPaths paths, IEnvironmentStore store)
     }
     public Dictionary<string, string> FreshEnvironment()
     {
-        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (OperatingSystem.IsWindows() && store is WindowsEnvironmentStore) return WindowsUserEnvironment.Read();
+        var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>().ToDictionary(e => (string)e.Key, e => (string)e.Value!, StringComparer.OrdinalIgnoreCase);
+        foreach (var name in AllowedNames) environment.Remove(name);
         var path = new List<string>();
         foreach (var scope in new[] { "Machine", "User" })
         {
@@ -153,6 +160,17 @@ public sealed class EnvironmentService(HubPaths paths, IEnvironmentStore store)
         foreach (var key in environment.Keys.ToArray()) environment[key] = Expand(environment[key]);
         environment["PATH"] = Expand(string.Join(';', path));
         return environment;
+    }
+    public Dictionary<string, string> PreviewEnvironment(EnvironmentRequest request)
+    {
+        var preview = new PreviewStore(store, request.Changes);
+        return new EnvironmentService(paths, preview).FreshEnvironment();
+    }
+    private sealed class PreviewStore(IEnvironmentStore original, List<EnvironmentChange> changes) : IEnvironmentStore
+    {
+        public EnvironmentValue Read(string scope, string name) => changes.FirstOrDefault(c => c.After.Scope == scope && c.After.Name.Equals(name, StringComparison.OrdinalIgnoreCase))?.After ?? original.Read(scope, name);
+        public void Write(EnvironmentValue _) => throw new NotSupportedException();
+        public void Broadcast() { }
     }
     private static bool SameExpandedPath(string a, string b)
     {

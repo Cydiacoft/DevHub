@@ -16,6 +16,7 @@ Windows 开发环境与命令行工具管理器。使用 C#、.NET 10、WinUI 3 
 - **版本管理**：查询官方下载目录，校验并安装 ZIP；Python 通过 uv，Rust 通过 rustup 管理。安装新版本后，再选择是否切换环境。
 - **项目环境**：选择各工具版本、创建或选择 Python 虚拟环境、打开专用终端、写入版本声明、配置 IntelliJ IDEA。
 - **环境诊断**：检查 Java 环境变量、入口冲突、pip 与 Python 对应关系、重复 PATH 和失效项目绑定。
+- **环境对比**：从诊断页对比当前进程、新终端和项目环境，查看所有已知命令的命中顺序、真实路径及配置覆盖。解析使用无个人配置的 PowerShell，不加载个人函数、别名或启动脚本。
 - **缓存与空间**：统计电脑上的常见开发缓存、发现的项目构建缓存和依赖，以及 DevHub 自身缓存。按工具或项目分组，支持目录查看和逐项确认清理。
 - **任务与日志**：查看当前运行的任务与输出，支持取消；完整日志留在 `.devhub/logs`。
 - **设置**：外观、扫描性能、额外工具目录、项目发现范围、Everything 接口、自定义 CLI 和配置恢复。
@@ -54,6 +55,8 @@ uv 缓存通过原生 `uv cache prune --cache-dir` 管理，清理未使用项�
 
 系统级切换先展示差异，记录环境变量的原值和注册表类型，再调用单独的管理员辅助程序。辅助程序仅接受规定的环境变量，并在写入前检查原值、保存备份、验证结果；失败时回滚。原有终端和 IDE 需要重新打开。
 
+默认修改当前用户；只有主动选择系统范围才请求管理员授权。用户 PATH 无法覆盖系统入口时，会在预览阶段阻止无效切换，提示使用项目终端或明确选择系统范围。实际写入后重新从 Windows 获取用户环境并解析命令，Java 同时验证 java、javac 与 JAVA_HOME；验证不符不会报告成功，可从配置备份恢复。
+
 项目终端通过子进程环境隔离各工具版本。`.NET` 项目保存绑定时同时确认 `global.json`；已有版本声明会在替换前明确确认和备份。IDEA 配置要求关闭 IDEA，支持项目 JDK 和已有 Gradle JVM 配置，模块及 Maven 的独立覆盖仍需在 IDE 中检查。
 
 DevHub 安装的独立 SDK 移除后进入 `.devhub/data/removed-sdks` 待清理区，可在缓存页永久清理。uv、rustup 和系统注册的安装通过对应管理器或原安装器处理。受项目引用或仍作为当前入口的版本需要先解除绑定或切换。
@@ -72,12 +75,13 @@ DevHub 安装的独立 SDK 移除后进入 `.devhub/data/removed-sdks` 待清理
 
 ## 构建与验证
 
-需要 Windows、.NET SDK 10.0.200 或兼容的 10.0 SDK，以及 Windows SDK / WinUI 构建工具。首次依赖还原需要访问 NuGet。
+构建需要 Windows、PowerShell 7、.NET SDK 10.0.200 或兼容的 10.0 SDK，以及 Windows SDK / WinUI 构建工具。首次依赖还原需要访问 NuGet。运行发布版使用系统自带 Windows PowerShell，不需要另外安装 PowerShell 7 或 .NET SDK。
 
 ```powershell
 .\build.ps1 -Task Build
 .\build.ps1 -Task Test
 .\build.ps1 -Task Publish
+.\build.ps1 -Task Package  # 生成干净的 ZIP、更新描述和 SHA-256
 ```
 
 其他只读检查：
@@ -86,6 +90,7 @@ DevHub 安装的独立 SDK 移除后进入 `.devhub/data/removed-sdks` 待清理
 .\build.ps1 -Task Scan       # 实际工具发现报告
 .\build.ps1 -Task Caches     # 电脑与项目缓存报告，不清理文件
 .\build.ps1 -Task Providers  # 联网核对官方下载目录，不安装 SDK
+.\build.ps1 -Task Doctor     # 当前进程 / 新终端环境证据，不修改系统
 ```
 
 测试使用独立夹具和内存环境变量存储，覆盖回滚、并发修改检查、项目隔离、解释器绑定、命令参数、校验失败、安装布局、ZIP 路径边界、缓存清理边界及 IDEA 备份恢复。系统级环境切换和真实卸载未在当前电脑上执行。
@@ -102,3 +107,15 @@ Everything 加速接口可用下面的脚本准备；下载到项目目录并验
 内置规则位于 `src/DevHub.Core/Catalog.json`，使用版本化 JSON 描述名称、命令入口、查询参数及 WinGet/Scoop/Chocolatey 包标识。复杂安装、环境和项目行为由专用服务处理。也可在界面中添加自定义工具规则。
 
 程序不提供项目代码的 Git 历史管理；Git 本身作为 CLI 工具纳入发现与安装维护。
+
+## 启动恢复与程序更新
+
+首次窗口显示不等待工具扫描或联网。损坏的 JSON 配置先复制到 `.devhub/backups/corrupt-*.json`，再使用默认配置；原始内容保留在备份中。启动脚本检查程序的就绪记录；启动失败会显示错误，日志在 `.devhub/logs/app-errors.log`。发布包内的 `Start-DevHub.cmd` 使用系统自带的 Windows PowerShell，支持中文与空格路径；也可直接打开 `DevHub.App.exe`。
+
+设置页显示当前版本、自动检查开关、检查结果、发布说明和“下载并重启更新”。每天最多后台检查一次，只查询 `Cydiacoft/DevHub` 的公开稳定版；没有 Release、断网或 GitHub 限流不影响软件启动。首次提供更新能力的版本为 1.1.0，之后需要发布更高版本才会出现更新提示。
+
+下载位于 `.devhub/cache/updates`，包必须通过发布描述、大小、SHA-256、文件清单和路径校验。独立更新程序运行在 `.devhub/data/app-updates`，等待原窗口退出后只替换清单内程序文件；SDK、项目配置、虚拟环境、源码和未管理的用户文件不在替换范围。旧程序保存在 `.devhub/backups/app-updates`；新版启动失败自动恢复旧版，更新中断后可从设置页恢复。若主程序本身无法启动，`Start-DevHub.cmd` 和项目快捷方式会先提供独立恢复入口。所有更新均由用户确认，不静默安装，不自动提权。
+
+GitHub Actions 在提交和 PR 时构建、测试并生成完整 ZIP；标签必须与 `Directory.Build.props` 中的版本一致。`v1.1.0` 这类标签通过检查后创建 GitHub Release **草稿**，公开发布前仍需按 `docs/VALIDATION.md` 在干净 Windows 环境验收。ZIP、`.update.json` 和 `.sha256` 必须一起发布。普通 CI 机器已安装开发运行时，不能替代干净系统验收。
+
+本版未提供安装器或代码签名。SHA-256 用于发布包完整性检查，更新来源固定为上述仓库的 HTTPS Release。

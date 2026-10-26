@@ -7,6 +7,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\DevHub.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SelfContained>true</SelfContained>
@@ -17,6 +18,7 @@
     <PublishDir>$(DevHubRoot).devhub\build\publish\DevHub\</PublishDir>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="$(DevHubRoot)scripts\Start-DevHub.ps1" Link="Start-DevHub.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\DevHub.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="$(DevHubRoot)third_party\tomlyn\LICENSE.txt" Link="licenses\Tomlyn.LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="$(DevHubRoot).devhub\data\integrations\everything\*" Condition="Exists('$(DevHubRoot).devhub\data\integrations\everything\es.exe')" Link="integrations\everything\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

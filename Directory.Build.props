@@ -1,6 +1,8 @@
 <Project>
   <PropertyGroup>
     <DevHubRoot>$(MSBuildThisFileDirectory)</DevHubRoot>
+    <Version>1.1.0</Version>
+    <InformationalVersion>$(Version)</InformationalVersion>
     <BaseIntermediateOutputPath>$(DevHubRoot).devhub\build\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
     <BaseOutputPath>$(DevHubRoot).devhub\build\bin\$(MSBuildProjectName)\</BaseOutputPath>
     <RestorePackagesPath>$(DevHubRoot).devhub\cache\nuget\packages</RestorePackagesPath>

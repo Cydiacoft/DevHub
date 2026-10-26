@@ -3,9 +3,61 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 using DevHub.Core;
 
 var paths = HubPaths.Discover();
+if (args.Length == 2 && args[0] == "--update-smoke")
+{
+    var source = Path.GetFullPath(args[1]); var sourceManifest = await AppUpdateService.ReadAndVerifyManifestAsync(source);
+    var cases = new List<object>();
+    foreach (var scenario in new[] { "success", "startup-failure", "interrupted" })
+    {
+        var failStartup = scenario == "startup-failure"; var interrupted = scenario == "interrupted";
+        var root = new HubPaths(Path.Combine(paths.State, "build", "update-smoke", Guid.NewGuid().ToString("N")));
+        var target = Path.Combine(root.Root, "program"); var stage = Path.Combine(root.Cache, "updates", "staged");
+        foreach (var directory in new[] { target, stage })
+        {
+            Directory.CreateDirectory(directory);
+            foreach (var file in sourceManifest.Files)
+            {
+                var destination = Path.Combine(directory, file.Path); Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Copy(Path.Combine(source, file.Path), destination);
+            }
+        }
+        var obsolete = Path.Combine(target, "old-only.txt"); await File.WriteAllTextAsync(obsolete, "old-managed-data"); var oldBytes = await File.ReadAllBytesAsync(obsolete);
+        var oldManifest = sourceManifest with { Version = "1.0.0", Files = [.. sourceManifest.Files, new("old-only.txt", Convert.ToHexString(SHA256.HashData(oldBytes)), oldBytes.Length)] };
+        var version = failStartup ? "99.0.0" : sourceManifest.Version;
+        await File.WriteAllTextAsync(Path.Combine(target, "release-manifest.json"), JsonSerializer.Serialize(oldManifest, JsonDefaults.Options));
+        await File.WriteAllTextAsync(Path.Combine(stage, "release-manifest.json"), JsonSerializer.Serialize(sourceManifest with { Version = version }, JsonDefaults.Options));
+        var protectedData = Path.Combine(root.Sdks, "must-survive.txt"); await File.WriteAllTextAsync(protectedData, "keep-sdk");
+        var request = new UpdateRequest(root.Root, target, stage, version, 0, Guid.NewGuid().ToString("N"));
+        var requestFile = await UpdateTransaction.PrepareRunnerAsync(request);
+        if (interrupted) { await UpdateTransaction.ApplyFilesAsync(request); File.Delete(Path.Combine(target, "DevHub.App.exe")); }
+        var info = new ProcessStartInfo(Path.Combine(UpdateTransaction.WorkDirectory(request), "runner", "DevHub.Updater.exe")) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
+        info.ArgumentList.Add(interrupted ? "--recover" : "--apply"); info.ArgumentList.Add(requestFile); info.ArgumentList.Add("--test-mode"); info.Environment.Remove("DEVHUB_WAIT_PID");
+        using var process = Process.Start(info)!;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        try { await process.WaitForExitAsync(timeout.Token); } catch { process.Kill(true); throw; }
+        var journal = JsonSerializer.Deserialize<UpdateJournal>(await File.ReadAllTextAsync(Path.Combine(UpdateTransaction.WorkDirectory(request), "journal.json")), JsonDefaults.Options)!;
+        if (journal.Status != (failStartup || interrupted ? "rolled-back" : "completed") || await File.ReadAllTextAsync(protectedData) != "keep-sdk" || File.Exists(obsolete) != (failStartup || interrupted) || !File.Exists(Path.Combine(target, "DevHub.App.exe"))) throw new InvalidOperationException("更新程序独立进程检查失败：" + journal.Status);
+        cases.Add(new { Scenario = scenario, journal.Status, ExitCode = process.ExitCode, Root = root.Root });
+        Console.WriteLine($"Updater process: {scenario} = {journal.Status}");
+    }
+    await File.WriteAllTextAsync(Path.Combine(paths.State, "build", "update-smoke-result.json"), JsonSerializer.Serialize(cases, JsonDefaults.Options)); return 0;
+}
+if (args.Contains("--doctor"))
+{
+    if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("新终端环境诊断需要 Windows。");
+    var store = new JsonStore(paths); var inventory = await store.LoadAsync("inventory", () => new List<ToolInstallation>());
+    var runner = new ProcessRunner(paths); var doctor = new EnvironmentDoctor(paths, runner);
+    var evidence = new List<EnvironmentEvidence>();
+    foreach (var context in new[] { (Name: "当前进程", Environment: EnvironmentDoctor.CurrentEnvironment()), (Name: "新终端", Environment: new EnvironmentService(paths, new WindowsEnvironmentStore()).FreshEnvironment()) })
+    {
+        var report = await doctor.InspectAsync(context.Name, context.Environment, DiscoveryService.BuiltInCatalog().Tools, inventory);
+        evidence.Add(report); Console.WriteLine($"{report.Name}: {report.Commands.Count} commands, {report.Issues.Count} issues");
+    }
+    await File.WriteAllTextAsync(Path.Combine(paths.Logs, "environment-report.json"), JsonSerializer.Serialize(evidence, JsonDefaults.Options)); return 0;
+}
 if (args.Contains("--agents"))
 {
     var store = new JsonStore(paths); var settings = await store.LoadAsync("settings", () => new HubSettings());
@@ -88,29 +140,29 @@ Test("stable IDs ignore Windows case", () => Equal(DiscoveryService.StableId("Ja
 Test("Java switch keeps unrelated PATH entries", () =>
 {
     var fake = new FakeEnvironmentStore(); fake.Write(new("Machine", "Path", @"C:\Tools;C:\Java\old\bin"));
-    var request = new EnvironmentService(fixtures, fake).PlanSwitch(jdk);
+    var request = new EnvironmentService(fixtures, fake).PlanSwitch(jdk, "Machine");
     var value = request.Changes.First(c => c.After.Name == "Path").After.Value!;
     True(value.StartsWith(Path.GetDirectoryName(jdk.ExecutablePath)!)); True(value.Contains(@"C:\Tools")); True(value.Contains(@"C:\Java\old\bin"));
 });
 Test("Java switch reconciles existing user JAVA_HOME", () =>
 {
     var fake = new FakeEnvironmentStore(); fake.Write(new("User", "JAVA_HOME", @"C:\Old"));
-    var req = new EnvironmentService(fixtures, fake).PlanSwitch(jdk);
+    var req = new EnvironmentService(fixtures, fake).PlanSwitch(jdk, "Machine");
     Equal(jdk.HomePath, req.Changes.Single(c => c.After.Name == "JAVA_HOME" && c.After.Scope == "User").After.Value);
 });
 Test("environment transaction persists and backs up", () =>
 {
-    var fake = new FakeEnvironmentStore(); var service = new EnvironmentService(fixtures, fake); var req = service.PlanSwitch(jdk);
+    var fake = new FakeEnvironmentStore(); var service = new EnvironmentService(fixtures, fake); var req = service.PlanSwitch(jdk, "Machine");
     EnvironmentService.ApplyTransaction(req, fake, fixtures); Equal(jdk.HomePath, fake.Read("Machine", "JAVA_HOME").Value); True(Directory.GetFiles(fixtures.Backups, "environment-*.json").Length > 0);
 });
 Test("environment transaction refuses stale preview", () =>
 {
-    var fake = new FakeEnvironmentStore(); var req = new EnvironmentService(fixtures, fake).PlanSwitch(jdk); fake.Write(new("Machine", "Path", "changed"));
+    var fake = new FakeEnvironmentStore(); var req = new EnvironmentService(fixtures, fake).PlanSwitch(jdk, "Machine"); fake.Write(new("Machine", "Path", "changed"));
     Throws<InvalidOperationException>(() => EnvironmentService.ApplyTransaction(req, fake, fixtures)); Equal("changed", fake.Read("Machine", "Path").Value);
 });
 Test("environment transaction rolls back failed write", () =>
 {
-    var fake = new FakeEnvironmentStore(); fake.Write(new("Machine", "Path", "original")); var req = new EnvironmentService(fixtures, fake).PlanSwitch(jdk);
+    var fake = new FakeEnvironmentStore(); fake.Write(new("Machine", "Path", "original")); var req = new EnvironmentService(fixtures, fake).PlanSwitch(jdk, "Machine");
     fake.FailOnceOnName = "JAVA_HOME"; Throws<IOException>(() => EnvironmentService.ApplyTransaction(req, fake, fixtures)); Equal("original", fake.Read("Machine", "Path").Value); Equal<string?>(null, fake.Read("Machine", "JAVA_HOME").Value);
 });
 Test("environment helper rejects arbitrary variables", () =>
@@ -389,6 +441,159 @@ AsyncTest("OpenCode array commands and VS Code servers use their own schemas", a
     Equal(2, scan.McpServers.Count); True(!scan.McpServers.Single(s => s.ClientId == "opencode").Enabled);
     Equal("http", scan.McpServers.Single(s => s.ClientId == "vscode").Transport); True(!JsonSerializer.Serialize(scan).Contains("private-value"));
 });
+Test("default environment repair changes only the current user", () =>
+{
+    var fake = new FakeEnvironmentStore(); fake.Write(new("Machine", "Path", "machine-keep")); fake.Write(new("Machine", "JAVA_HOME", "machine-jdk"));
+    var request = new EnvironmentService(fixtures, fake).PlanSwitch(jdk); Equal("User", request.Scope); True(request.Changes.All(c => c.Before.Scope == "User"));
+    EnvironmentService.ApplyTransaction(request, fake, fixtures); Equal("machine-jdk", fake.Read("Machine", "JAVA_HOME").Value); Equal(jdk.HomePath, fake.Read("User", "JAVA_HOME").Value);
+});
+Test("repair preview exposes system PATH shadowing and never writes", () =>
+{
+    var fake = new FakeEnvironmentStore(); var other = FixtureTool("java", "shadowing-java"); fake.Write(new("Machine", "Path", Path.GetDirectoryName(other.ExecutablePath)));
+    var service = new EnvironmentService(fixtures, fake); var request = service.PlanSwitch(jdk); var preview = service.PreviewEnvironment(request);
+    Equal(other.ExecutablePath, EnvironmentDoctor.Resolve("java", preview).First().Path); Equal<string?>(null, fake.Read("User", "JAVA_HOME").Value);
+});
+Test("command evidence preserves PATH order aliases and duplicate directories", () =>
+{
+    var first = FixtureTool("node", "first path"); var second = FixtureTool("node", "second 中文 path");
+    var env = new Dictionary<string, string> { ["PATH"] = Path.GetDirectoryName(first.ExecutablePath) + ";" + Path.GetDirectoryName(second.ExecutablePath) + ";" + Path.GetDirectoryName(first.ExecutablePath), ["PATHEXT"] = ".EXE;.CMD" };
+    var result = EnvironmentDoctor.Resolve("node", env); Equal(2, result.Count); Equal(first.ExecutablePath, result[0].Path); Equal(second.ExecutablePath, result[1].Path);
+});
+AsyncTest("recovering config preserves corrupt input before using defaults", async () =>
+{
+    var warnings = new List<string>(); var store = new JsonStore(fixtures); var input = Path.Combine(fixtures.Data, "broken-startup.json");
+    await File.WriteAllTextAsync(input, "{broken-startup-private"); var settings = await store.LoadRecoveringAsync("broken-startup", () => new HubSettings(), warnings);
+    True(settings.CheckForUpdates); Equal(1, warnings.Count); await store.SaveAsync("broken-startup", settings);
+    var backup = Directory.GetFiles(fixtures.Backups, "corrupt-broken-startup-*.json").Single(); Equal("{broken-startup-private", await File.ReadAllTextAsync(backup));
+});
+Test("startup readiness reports are atomic and constrained to a token", () =>
+{
+    var id = Guid.NewGuid().ToString("N"); StartupLifecycle.Report(fixtures, id, "ready");
+    var report = JsonSerializer.Deserialize<StartupReport>(File.ReadAllText(StartupLifecycle.ReportPath(fixtures, id)), JsonDefaults.Options)!;
+    Equal(Environment.ProcessId, report.ProcessId); Equal("ready", report.Status); Throws<ArgumentException>(() => StartupLifecycle.ReportPath(fixtures, "../outside"));
+});
+Test("structured project declarations do not use substring matching", () =>
+{
+    var directory = Path.Combine(testRoot, "declarations"); Directory.CreateDirectory(directory); File.WriteAllText(Path.Combine(directory, ".python-version"), "13.10.1");
+    var install = python with { Version = "3.10.1" }; var profile = new ProjectProfile { Directory = directory, Bindings = new() { ["python"] = install.Id } };
+    True(ProjectDeclarations.Inspect(profile, [install]).Any(i => i.Severity == "警告"));
+    File.WriteAllText(Path.Combine(directory, ".python-version"), "3.10"); True(!ProjectDeclarations.Inspect(profile, [install]).Any(i => i.Severity == "警告"));
+});
+Test("malformed SDK declaration is reported without crashing diagnostics", () =>
+{
+    var directory = Path.Combine(testRoot, "bad-declarations"); Directory.CreateDirectory(directory); File.WriteAllText(Path.Combine(directory, "global.json"), "{}");
+    var install = jdk with { ToolId = "dotnet" }; var profile = new ProjectProfile { Directory = directory, Bindings = new() { ["dotnet"] = install.Id } };
+    True(ProjectDeclarations.Inspect(profile, [install]).Any(i => i.Title.Contains("无法解析")));
+});
+Test("app semantic versions compare numeric components and prereleases", () =>
+{
+    True(AppVersion.Compare("1.10.0", "1.9.9") > 0); True(AppVersion.Compare("1.1.0", "1.1.0-rc.2") > 0); True(AppVersion.Compare("1.1.0-rc.10", "1.1.0-rc.2") > 0);
+    Equal(0, AppVersion.Compare("v1.1.0+build", "1.1.0")); True(!AppVersion.IsStable("1.1.0-beta"));
+});
+AsyncTest("update check handles no releases and rate limiting", async () =>
+{
+    using var noRelease = new AppUpdateService(fixtures, new RoutingHttp(_ => new HttpResponseMessage(HttpStatusCode.NotFound)));
+    Equal<AvailableUpdate?>(null, await noRelease.CheckAsync("1.1.0"));
+    using var limited = new AppUpdateService(fixtures, new RoutingHttp(_ => new HttpResponseMessage(HttpStatusCode.Forbidden)));
+    await ThrowsAsync<InvalidOperationException>(() => limited.CheckAsync("1.1.0"));
+});
+AsyncTest("update check validates repository version asset names sizes and digests", async () =>
+{
+    var descriptor = new UpdateDescriptor(1, "1.2.0", "win-x64", "DevHub-1.2.0-win-x64.zip", new string('a', 64), 128);
+    var release = JsonSerializer.Serialize(new { draft = false, prerelease = false, tag_name = "v1.2.0", body = "notes", assets = new[] {
+        new { name = "DevHub-1.2.0-win-x64.update.json", browser_download_url = "https://github.com/Cydiacoft/DevHub/releases/download/v1.2.0/DevHub-1.2.0-win-x64.update.json", size = 100 },
+        new { name = descriptor.AssetName, browser_download_url = "https://github.com/Cydiacoft/DevHub/releases/download/v1.2.0/" + descriptor.AssetName, size = 128 } } });
+    using var service = new AppUpdateService(fixtures, new RoutingHttp(request => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(request.RequestUri!.AbsolutePath.EndsWith("latest") ? release : JsonSerializer.Serialize(descriptor, JsonDefaults.Options)) }));
+    Equal("1.2.0", (await service.CheckAsync("1.1.0"))!.Descriptor.Version);
+    Equal<AvailableUpdate?>(null, await service.CheckAsync("1.2.0"));
+});
+Test("update paths reject caches SDKs traversal devices streams and aliases", () =>
+{
+    foreach (var path in new[] { "../SDK", "C:/file", ".devhub/data/settings.json", "a/.devhub/sdks/x", "thing:stream", "a/CON.txt", "a/../b", "a./x", "a /x", "a|b", "DevHub.root" }) Throws<InvalidDataException>(() => AppUpdateService.SafeRelativePath(path));
+});
+AsyncTest("update ZIP rejects traversal symlinks duplicate names and bad hashes", async () =>
+{
+    var archive = Path.Combine(testRoot, "bad-update.zip"); await File.WriteAllBytesAsync(archive, ZipBytes("../escape"));
+    await ThrowsAsync<InvalidDataException>(() => AppUpdateService.StageArchiveAsync(archive, Path.Combine(testRoot, "bad-update-stage"), "1.2.0"));
+    True(!Directory.Exists(Path.Combine(testRoot, "bad-update-stage")));
+    await File.WriteAllBytesAsync(archive, ZipBytes("DevHub.App.exe", "devhub.app.exe"));
+    await ThrowsAsync<InvalidDataException>(() => AppUpdateService.StageArchiveAsync(archive, Path.Combine(testRoot, "duplicate-update-stage"), "1.2.0"));
+});
+AsyncTest("update download cancellation and checksum failure never change installed files", async () =>
+{
+    var descriptor = new UpdateDescriptor(1, "1.2.0", "win-x64", "DevHub-1.2.0-win-x64.zip", new string('a', 64), 3);
+    using var service = new AppUpdateService(fixtures, new RoutingHttp(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) }));
+    await ThrowsAsync<InvalidDataException>(() => service.DownloadAsync(new(descriptor, "v1.2.0", "", "")));
+    using var canceled = new CancellationTokenSource(); canceled.Cancel();
+    await ThrowsAsync<OperationCanceledException>(() => service.DownloadAsync(new(descriptor, "v1.2.0", "", ""), ct: canceled.Token));
+});
+AsyncTest("verified update is staged and rejects modifications or unlisted files", async () =>
+{
+    var release = Path.Combine(testRoot, "verified-release"); await MakeRelease(release, "1.2.0", "new");
+    Equal("1.2.0", (await AppUpdateService.ReadAndVerifyManifestAsync(release)).Version);
+    var archive = Path.Combine(testRoot, "good-update.zip"); ZipFile.CreateFromDirectory(release, archive);
+    var staged = Path.Combine(testRoot, "good-update-stage"); await AppUpdateService.StageArchiveAsync(archive, staged, "1.2.0");
+    await File.WriteAllTextAsync(Path.Combine(staged, "unlisted.txt"), "unlisted"); await ThrowsAsync<InvalidDataException>(() => AppUpdateService.ReadAndVerifyManifestAsync(staged));
+    await File.WriteAllTextAsync(Path.Combine(release, "DevHub.App.dll"), "modified"); await ThrowsAsync<InvalidDataException>(() => AppUpdateService.ReadAndVerifyManifestAsync(release));
+});
+AsyncTest("portable update changes only managed program files and can restore after interruption", async () =>
+{
+    var directory = Path.Combine(testRoot, "portable 中文 app"); await MakeRelease(directory, "1.1.0", "old", "obsolete.dll");
+    var portable = new HubPaths(directory); var protectedFile = Path.Combine(portable.Sdks, "keep-sdk.txt"); await File.WriteAllTextAsync(protectedFile, "sdk");
+    var config = Path.Combine(portable.Data, "settings.json"); await File.WriteAllTextAsync(config, "settings");
+    var unrelated = Path.Combine(directory, "user-notes.txt"); await File.WriteAllTextAsync(unrelated, "keep");
+    var stage = Path.Combine(portable.Cache, "updates", "staged"); await MakeRelease(stage, "1.2.0", "new");
+    var request = new UpdateRequest(directory, directory, stage, "1.2.0", 0, Guid.NewGuid().ToString("N"));
+    var journal = await UpdateTransaction.ApplyFilesAsync(request);
+    Equal("new", await File.ReadAllTextAsync(Path.Combine(directory, "DevHub.App.dll"))); True(!File.Exists(Path.Combine(directory, "obsolete.dll")));
+    Equal("sdk", await File.ReadAllTextAsync(protectedFile)); Equal("settings", await File.ReadAllTextAsync(config)); Equal("keep", await File.ReadAllTextAsync(unrelated));
+    await UpdateTransaction.RollbackAsync(journal, "simulated interruption");
+    Equal("old", await File.ReadAllTextAsync(Path.Combine(directory, "DevHub.App.dll"))); True(File.Exists(Path.Combine(directory, "obsolete.dll")));
+    Equal("sdk", await File.ReadAllTextAsync(protectedFile)); Equal("settings", await File.ReadAllTextAsync(config));
+});
+AsyncTest("update refuses to overwrite untracked user files and occupied files", async () =>
+{
+    var directory = Path.Combine(testRoot, "update-file-conflict"); await MakeRelease(directory, "1.1.0", "old"); var root = new HubPaths(directory);
+    await File.WriteAllTextAsync(Path.Combine(directory, "extra.dll"), "user file");
+    var stage = Path.Combine(root.Cache, "updates", "staged"); await MakeRelease(stage, "1.2.0", "new", "extra.dll");
+    var request = new UpdateRequest(directory, directory, stage, "1.2.0", 0, Guid.NewGuid().ToString("N"));
+    await ThrowsAsync<InvalidOperationException>(() => UpdateTransaction.ApplyFilesAsync(request)); Equal("old", await File.ReadAllTextAsync(Path.Combine(directory, "DevHub.App.dll")));
+    await MakeRelease(stage, "1.2.0", "new"); File.Delete(Path.Combine(stage, "extra.dll")); // regenerate manifest without the conflicting path
+    using var locked = new FileStream(Path.Combine(directory, "DevHub.App.dll"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+    await ThrowsAsync<IOException>(() => UpdateTransaction.ApplyFilesAsync(request));
+});
+if (OperatingSystem.IsWindows())
+{
+    AsyncTest("native no-profile command resolution does not execute discovered commands or export secret variables", async () =>
+    {
+        var directory = Path.Combine(testRoot, "doctor-entry 中文"); Directory.CreateDirectory(directory); var command = Path.Combine(directory, "doctor-test.cmd");
+        await File.WriteAllTextAsync(command, "@echo off\r\necho WRONG>must-not-run\r\n");
+        var environment = EnvironmentDoctor.CurrentEnvironment(); environment["PATH"] = directory; environment["PRIVATE_API_TOKEN"] = "do-not-export-this-value";
+        var catalog = new List<ToolDefinition> { new() { Id = "doctor-test", Name = "Doctor test", Executables = ["doctor-test.cmd"] } };
+        var evidence = await new EnvironmentDoctor(fixtures, new ProcessRunner(fixtures)).InspectAsync("test", environment, catalog, []);
+        Equal(command, evidence.Commands.First(t => t.ToolId == "doctor-test").SelectedPath); True(!File.Exists(Path.Combine(testRoot, "must-not-run"))); True(!JsonSerializer.Serialize(evidence).Contains("do-not-export-this-value"));
+    });
+}
+AsyncTest("updater rejects downgrades and same-version replacements before writes", async () =>
+{
+    var directory = Path.Combine(testRoot, "downgrade"); await MakeRelease(directory, "1.2.0", "current"); var root = new HubPaths(directory);
+    var stage = Path.Combine(root.Cache, "updates", "staged"); await MakeRelease(stage, "1.1.0", "older");
+    var request = new UpdateRequest(directory, directory, stage, "1.1.0", 0, Guid.NewGuid().ToString("N"));
+    await ThrowsAsync<InvalidOperationException>(() => UpdateTransaction.ApplyFilesAsync(request)); Equal("current", await File.ReadAllTextAsync(Path.Combine(directory, "DevHub.App.dll")));
+});
+AsyncTest("updater rejects ZIP symlinks without leaving an installation", async () =>
+{
+    var archive = Path.Combine(testRoot, "symlink-update.zip");
+    using (var zip = ZipFile.Open(archive, ZipArchiveMode.Create)) { var link = zip.CreateEntry("linked"); link.ExternalAttributes = unchecked((int)0xA1FF0000); using var writer = new StreamWriter(link.Open()); writer.Write("../outside"); }
+    var stage = Path.Combine(testRoot, "symlink-update-stage"); await ThrowsAsync<InvalidDataException>(() => AppUpdateService.StageArchiveAsync(archive, stage, "1.2.0")); True(!Directory.Exists(stage));
+});
+Test("locked project declarations do not prevent the overview from opening", () =>
+{
+    var directory = Path.Combine(testRoot, "locked declarations"); Directory.CreateDirectory(directory);
+    var file = Path.Combine(directory, "gradle.properties"); File.WriteAllText(file, "org.gradle.java.home=C:/test");
+    using var locked = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+    True(ProjectDeclarations.Inspect(new ProjectProfile { Directory = directory }, []).Any(i => i.Title.Contains("无法读取")));
+});
 var passed = 0;
 foreach (var test in tests)
 {
@@ -402,6 +607,20 @@ static byte[] ZipBytes(params string[] entries)
 {
     using var stream = new MemoryStream(); using (var zip = new ZipArchive(stream, ZipArchiveMode.Create, true)) foreach (var name in entries) { using var writer = new StreamWriter(zip.CreateEntry(name).Open()); writer.Write("fixture"); }
     return stream.ToArray();
+}
+static async Task MakeRelease(string directory, string version, string content, params string[] extra)
+{
+    Directory.CreateDirectory(directory); var files = new List<ReleaseFile>();
+    foreach (var path in AppUpdateService.RequiredFiles.Concat(extra))
+    {
+        var full = Path.Combine(directory, path); Directory.CreateDirectory(Path.GetDirectoryName(full)!); await File.WriteAllTextAsync(full, content);
+        var bytes = await File.ReadAllBytesAsync(full); files.Add(new(path, Convert.ToHexString(SHA256.HashData(bytes)), bytes.Length));
+    }
+    await File.WriteAllTextAsync(Path.Combine(directory, "release-manifest.json"), JsonSerializer.Serialize(new ReleaseManifest(1, version, "win-x64", 19041, files), JsonDefaults.Options));
+}
+sealed class RoutingHttp(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) { cancellationToken.ThrowIfCancellationRequested(); return Task.FromResult(respond(request)); }
 }
 sealed class FakeEnvironmentStore : IEnvironmentStore
 {

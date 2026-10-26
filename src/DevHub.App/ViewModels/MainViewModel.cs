@@ -13,6 +13,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public List<CacheEntry>? CacheEntries { get; private set; }
     public DateTimeOffset? CacheScannedAt { get; private set; }
     public AgentSnapshot? Agents { get; private set; }
+    public List<string> StartupWarnings { get; } = [];
     public ObservableCollection<HubTask> Tasks { get; } = [];
     public ProcessRunner Runner { get; }
     public DiscoveryService Discovery { get; }
@@ -41,11 +42,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     }
     public async Task InitializeAsync()
     {
-        Settings = await Store.LoadAsync("settings", () => new HubSettings());
-        Projects = await Store.LoadAsync("projects", () => new List<ProjectProfile>());
-        Installations = await Store.LoadAsync("inventory", () => new List<ToolInstallation>());
+        var marker = Path.Combine(Paths.Root, "DevHub.root");
+        if (!File.Exists(marker)) await File.WriteAllTextAsync(marker, "DevHub portable data root\n");
+        Settings = await Store.LoadRecoveringAsync("settings", () => new HubSettings(), StartupWarnings);
+        Projects = await Store.LoadRecoveringAsync("projects", () => new List<ProjectProfile>(), StartupWarnings);
+        Installations = await Store.LoadRecoveringAsync("inventory", () => new List<ToolInstallation>(), StartupWarnings);
         DataChanged?.Invoke();
-        await ScanAsync();
     }
     public async Task ScanAsync()
         => await ScanCoreAsync(false);

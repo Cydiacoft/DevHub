@@ -96,6 +96,8 @@ public sealed record HubSettings
     public bool UseEverything { get; set; } = true;
     public string? EverythingCliPath { get; set; }
     public List<string> CacheProjectRoots { get; set; } = [];
+    public bool CheckForUpdates { get; set; } = true;
+    public DateTimeOffset? LastUpdateCheck { get; set; }
 }
 
 public sealed record VersionCacheEntry(string Fingerprint, string Version, DateTimeOffset Updated);

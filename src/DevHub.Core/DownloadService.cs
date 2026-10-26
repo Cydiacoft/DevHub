@@ -270,7 +270,7 @@ public sealed class DownloadService : IVersionProvider, IDisposable
                 var layout = Path.Combine(staging, ".android-layout");
                 var tools = Path.Combine(layout, "cmdline-tools"); Directory.CreateDirectory(tools);
                 if (root == staging) throw new InvalidDataException("Android 安装包应包含 cmdline-tools 根目录。");
-                Directory.Move(root, Path.Combine(tools, "latest")); root = layout;
+                await DirectoryOperations.MoveAsync(root, Path.Combine(tools, "latest"), ct); root = layout;
             }
             var expected = release.ToolId switch
             {
@@ -280,7 +280,7 @@ public sealed class DownloadService : IVersionProvider, IDisposable
             if (!File.Exists(Path.Combine(root, expected))) throw new InvalidDataException("安装包不包含预期的工具入口：" + expected);
             ct.ThrowIfCancellationRequested();
             await File.WriteAllTextAsync(Path.Combine(root, ".devhub-install.json"), JsonSerializer.Serialize(release, JsonDefaults.Options), ct);
-            Directory.Move(root, destination);
+            await DirectoryOperations.MoveAsync(root, destination, ct);
             progress?.Report((100, "已安装，正在重新扫描…"));
             return destination;
         }
