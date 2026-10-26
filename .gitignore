@@ -1,0 +1,7 @@
+.devhub/
+DevHub.lnk
+.vs/
+**/bin/
+**/obj/
+*.user
+*.suo

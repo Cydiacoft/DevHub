@@ -1,0 +1,38 @@
+param([ValidateSet('Build','Test','Publish','Scan','Providers','Caches','Agents')][string]$Task = 'Build', [switch]$NoRestore, [ValidateSet('Debug','Release')][string]$Configuration = 'Release')
+$ErrorActionPreference = 'Stop'
+$devHubRoot = $PSScriptRoot
+$env:DEVHUB_ROOT = $devHubRoot
+$env:DOTNET_CLI_HOME = Join-Path $devHubRoot '.devhub/data/dotnet-home'
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+$env:DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'
+$env:NUGET_PACKAGES = Join-Path $devHubRoot '.devhub/cache/nuget/packages'
+$env:NUGET_HTTP_CACHE_PATH = Join-Path $devHubRoot '.devhub/cache/nuget/http'
+$env:NUGET_SCRATCH = Join-Path $devHubRoot '.devhub/cache/nuget/scratch'
+$env:NUGET_PLUGINS_CACHE_PATH = Join-Path $devHubRoot '.devhub/cache/nuget/plugins'
+$env:TEMP = Join-Path $devHubRoot '.devhub/cache/tmp'
+$env:TMP = $env:TEMP
+foreach ($directory in @($env:DOTNET_CLI_HOME,$env:NUGET_PACKAGES,$env:NUGET_HTTP_CACHE_PATH,$env:NUGET_SCRATCH,$env:NUGET_PLUGINS_CACHE_PATH,$env:TEMP)) { New-Item -ItemType Directory -Force -Path $directory | Out-Null }
+Push-Location $devHubRoot
+try {
+    $project = if ($Task -in @('Test','Scan','Providers','Caches','Agents')) { 'tests/DevHub.Tests/DevHub.Tests.csproj' } else { 'DevHub.slnx' }
+    if (-not $NoRestore) { & dotnet restore $project -p:Platform=x64 --disable-parallel; if ($LASTEXITCODE) { throw '依赖还原失败' } }
+    if ($Task -eq 'Publish') {
+        & dotnet publish 'src/DevHub.App/DevHub.App.csproj' -c Release -p:Platform=x64 --no-restore -m:1 -nr:false
+        if ($LASTEXITCODE) { throw '界面发布失败' }
+        & dotnet publish 'src/DevHub.Helper/DevHub.Helper.csproj' -c Release -r win-x64 --self-contained true -o '.devhub/build/publish/DevHub/helper' --no-restore -m:1 -nr:false
+        if ($LASTEXITCODE) { throw '系统配置辅助程序发布失败' }
+        & (Join-Path $devHubRoot 'scripts/New-DevHubLauncher.ps1')
+    } elseif ($Task -in @('Test','Scan','Providers','Caches','Agents')) {
+        $runArgs = @('run','--project',$project,'-p:Platform=x64','--configuration',$Configuration,'--no-restore')
+        if ($Task -eq 'Scan') { $runArgs += @('--','--scan') }
+        if ($Task -eq 'Providers') { $runArgs += @('--','--providers') }
+        if ($Task -eq 'Caches') { $runArgs += @('--','--caches') }
+        if ($Task -eq 'Agents') { $runArgs += @('--','--agents') }
+        & dotnet @runArgs
+        if ($LASTEXITCODE) { throw '验证失败' }
+    } else {
+        & dotnet build $project -c $Configuration -p:Platform=x64 --no-restore -m:1 -nr:false
+        if ($LASTEXITCODE) { throw '构建失败' }
+    }
+} finally { Pop-Location }

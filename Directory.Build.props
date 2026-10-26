@@ -1,0 +1,15 @@
+<Project>
+  <PropertyGroup>
+    <DevHubRoot>$(MSBuildThisFileDirectory)</DevHubRoot>
+    <BaseIntermediateOutputPath>$(DevHubRoot).devhub\build\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(DevHubRoot).devhub\build\bin\$(MSBuildProjectName)\</BaseOutputPath>
+    <RestorePackagesPath>$(DevHubRoot).devhub\cache\nuget\packages</RestorePackagesPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);$(DevHubRoot).devhub\**</DefaultItemExcludes>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <UseSharedCompilation>false</UseSharedCompilation>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations><Platform Name="x64" /></Configurations>
+  <Project Path="src/DevHub.Core/DevHub.Core.csproj" />
+  <Project Path="src/DevHub.App/DevHub.App.csproj" />
+  <Project Path="src/DevHub.Helper/DevHub.Helper.csproj" />
+  <Project Path="tests/DevHub.Tests/DevHub.Tests.csproj" />
+</Solution>
