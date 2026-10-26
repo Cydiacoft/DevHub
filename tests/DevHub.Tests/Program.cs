@@ -243,8 +243,16 @@ AsyncTest("uv cache cleanup uses native prune with an explicit directory", async
     var dir = Path.Combine(fixtures.Cache, "uv"); Directory.CreateDirectory(dir); var file = Path.Combine(dir, "fixture.dat"); await File.WriteAllTextAsync(file, "keep");
     var service = new CacheService(fixtures); var entry = service.Inspect().Single(e => e.Directory == dir);
     Throws<InvalidOperationException>(() => service.Clear(entry));
-    var runner = new FakeRunner(); await service.ClearAsync(entry, runner);
-    True(runner.Last!.Arguments.Contains("prune")); True(runner.Last.Arguments.Contains("--cache-dir")); True(runner.Last.Arguments.Contains(dir)); True(File.Exists(file));
+    var toolDirectory = Path.Combine(testRoot, "fake-uv-bin"); Directory.CreateDirectory(toolDirectory); await File.WriteAllTextAsync(Path.Combine(toolDirectory, "uv.exe"), "fixture, never executed");
+    var previousPath = Environment.GetEnvironmentVariable("PATH");
+    try
+    {
+        Environment.SetEnvironmentVariable("PATH", toolDirectory);
+        var runner = new FakeRunner(); await service.ClearAsync(entry, runner);
+        Equal(Path.Combine(toolDirectory, "uv.exe"), runner.Last!.FileName);
+        True(runner.Last.Arguments.Contains("prune")); True(runner.Last.Arguments.Contains("--cache-dir")); True(runner.Last.Arguments.Contains(dir)); True(File.Exists(file));
+    }
+    finally { Environment.SetEnvironmentVariable("PATH", previousPath); }
 });
 Test("cache cleanup reports released space and skips locked files", () =>
 {
@@ -594,6 +602,19 @@ Test("locked project declarations do not prevent the overview from opening", () 
     using var locked = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
     True(ProjectDeclarations.Inspect(new ProjectProfile { Directory = directory }, []).Any(i => i.Title.Contains("无法读取")));
 });
+if (OperatingSystem.IsWindows() && DiscoveryService.ResolveCommand(["python.exe"]) is { } metadataPython && !metadataPython.Contains("\\WindowsApps\\", StringComparison.OrdinalIgnoreCase))
+{
+    AsyncTest("Python metadata probes do not import modules from the project or PYTHONPATH", async () =>
+    {
+        var directory = Path.Combine(testRoot, "python-project-imports"); Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "json.py"), "raise RuntimeError('project json module executed')");
+        var environment = EnvironmentDoctor.CurrentEnvironment(); environment["PYTHONPATH"] = directory;
+        var trace = new CommandTrace("python", "Python", "python", [new(metadataPython, metadataPython, 1, "test")], null, "test");
+        var result = await new EnvironmentDoctor(fixtures, new ProcessRunner(fixtures)).ProbeAsync(trace, environment, directory);
+        using var json = JsonDocument.Parse(result); True(json.RootElement.GetProperty("executable").GetString()!.Length > 0);
+        True(!Directory.Exists(Path.Combine(directory, "__pycache__"))); Equal(directory, environment["PYTHONPATH"]);
+    });
+}
 var passed = 0;
 foreach (var test in tests)
 {

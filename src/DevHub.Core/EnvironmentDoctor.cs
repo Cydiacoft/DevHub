@@ -97,6 +97,7 @@ public sealed class EnvironmentDoctor(HubPaths paths, ICommandRunner runner)
             if (environment.GetValueOrDefault(variable) is { Length: > 0 } directory && !Directory.Exists(directory)) issues.Add(new("错误", variable + " 目录不存在", directory));
         if (environment.GetValueOrDefault("ANDROID_HOME") is { } android && environment.GetValueOrDefault("ANDROID_SDK_ROOT") is { } sdk && !DiscoveryService.SamePath(android, sdk)) issues.Add(new("警告", "Android SDK 环境变量指向不同目录", $"ANDROID_HOME：{android}\nANDROID_SDK_ROOT：{sdk}", "android"));
         if (environment.GetValueOrDefault("PYTHONHOME") is { Length: > 0 } pythonHome) issues.Add(new("提示", "PYTHONHOME 会影响解释器启动", pythonHome + "\n建议：通过项目虚拟环境使用明确的解释器。", "python"));
+        if (environment.GetValueOrDefault("PYTHONPATH") is { Length: > 0 }) issues.Add(new("提示", "PYTHONPATH 会影响模块加载", "解释器元数据查询不加载 PYTHONPATH 中的项目模块；入口仍按此环境解析。", "python"));
         var pythonTrace = traces.FirstOrDefault(t => t.ToolId == "python"); var pipTrace = traces.FirstOrDefault(t => t.ToolId == "pip");
         if (pythonTrace?.SelectedPath is { } python && !python.Contains("\\WindowsApps\\", StringComparison.OrdinalIgnoreCase))
         {
@@ -148,15 +149,27 @@ public sealed class EnvironmentDoctor(HubPaths paths, ICommandRunner runner)
         if (trace.ToolId == "python" && file.Contains("\\WindowsApps\\", StringComparison.OrdinalIgnoreCase)) return "Windows 应用执行别名，不会启动商店入口。";
         var definition = DiscoveryService.BuiltInCatalog().Tools.FirstOrDefault(t => t.Id == trace.ToolId) ?? throw new InvalidOperationException("没有内置的安全查询规则。");
         IReadOnlyList<string> args = trace.Command == "javac" ? ["-version"] : definition.VersionArgs;
-        if (trace.ToolId == "python") args = ["-c", "import sys,json; print(json.dumps({'executable':sys.executable,'version':sys.version,'prefix':sys.prefix,'base_prefix':sys.base_prefix}))"];
+        if (trace.ToolId == "python") args = ["-c", "import sys; print(sys.executable.encode('utf-8').hex()); print(sys.version.encode('utf-8').hex()); print(sys.prefix.encode('utf-8').hex()); print(sys.base_prefix.encode('utf-8').hex())"];
         if (trace.ToolId == "pip") args = ["--version"];
         if (trace.ToolId == "dotnet") args = ["--version"];
         var probeEnvironment = new Dictionary<string, string>(environment, StringComparer.OrdinalIgnoreCase);
-        if (trace.ToolId is "python" or "pip") probeEnvironment["PYTHONIOENCODING"] = "utf-8";
+        if (trace.ToolId is "python" or "pip")
+        {
+            probeEnvironment["PYTHONIOENCODING"] = "utf-8"; probeEnvironment["PYTHONPATH"] = ""; probeEnvironment["PYTHONDONTWRITEBYTECODE"] = "1";
+            directory = Path.Combine(paths.Data, "diagnostic-probes"); Directory.CreateDirectory(directory);
+        }
         // Cache redirection does not change command resolution or SDK selection.
         foreach (var pair in paths.CacheEnvironment().Where(p => p.Key is "TEMP" or "TMP" or "PIP_CACHE_DIR" or "npm_config_cache" or "NUGET_PACKAGES" or "NUGET_HTTP_CACHE_PATH" or "GRADLE_USER_HOME")) probeEnvironment[pair.Key] = pair.Value;
         var result = await runner.RunAsync(new(file, args, directory, probeEnvironment, 15, PreserveHostEnvironment: true), cancellation: ct);
-        result.EnsureSuccess(); return result.Combined;
+        result.EnsureSuccess();
+        if (trace.ToolId == "python")
+        {
+            var lines = result.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length != 4 || lines.Any(l => !Regex.IsMatch(l, "^[a-fA-F0-9]+$") || l.Length % 2 != 0)) throw new InvalidOperationException("解释器元数据包含额外启动输出，无法可靠判断环境。");
+            var fields = lines.Select(l => Encoding.UTF8.GetString(Convert.FromHexString(l))).ToArray();
+            return JsonSerializer.Serialize(new { executable = fields[0], version = fields[1], prefix = fields[2], base_prefix = fields[3] });
+        }
+        return result.Combined;
     }
     public static string RealPath(string path)
     {
