@@ -2,6 +2,8 @@
 
 DevHub uses Microsoft .NET, Windows App SDK and Windows SDK packages under their respective licenses. Their package license and notice files are retained in the project-local NuGet cache; native runtime components are included in the self-contained distribution.
 
+Release packaging copies available license and notice files from the restored NuGet dependency graph into `licenses/nuget`, alongside this notice. Build-only dependency notices may also be included.
+
 The optional Everything ES integration is produced by voidtools and distributed under the MIT License. Official source: https://github.com/voidtools/ES. Official binary: https://www.voidtools.com/ES-1.1.0.38.x64.zip. The pinned archive SHA-256 is `5E0C70CBF4F694080C34AA7C6C745E606C16FE76A4B5423B93EBF9DC34274C99`. Its license is in `third_party/everything/LICENSE.txt` and accompanies `es.exe` in the published integration directory.
 
 SDKs installed by the user are obtained from their selected publishers and retain their original license files.
